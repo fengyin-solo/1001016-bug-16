@@ -19,6 +19,8 @@ class ActionResult(BaseModel):
     ok: bool
     message: str
     entry: dict[str, Any] | None = None
+    changed: bool | None = None  # 是否真正发生状态变更（幂等重试时为 False）
+    duplicate: bool | None = None  # 是否命中重复编号，复用了已有记录
 
 
 class EntryPayload(BaseModel):
