@@ -14,20 +14,42 @@ service = ComplaintService()
 
 LIST_FIELDS = ["记录编号", "来电人", "来电内容", "问题位置", "问题类型", "转办部门", "处理结果", "记录状态"]
 STATUSES = ["待转办", "已转办", "处理中", "已办结"]
+FIELD_HINTS = {
+    "记录编号": "请填写受理编号",
+    "来电人": "请填写来电人称呼",
+    "来电内容": "请补充市民反映的问题",
+}
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按记录编号检索"),
+    caller: str | None = Query(default=None, description="按来电人检索"),
+    content: str | None = Query(default=None, description="按来电内容检索"),
     status: str | None = Query(default=None, description="待转办、已转办、处理中、已办结"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按记录编号与状态过滤市民热线列表；没有数据时返回空页，不报错。"""
+    """按记录编号、来电人、来电内容与状态过滤市民热线列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(
+        keyword=keyword, caller=caller, content=content, status=status, page=page, size=size
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/summary")
+def status_summary() -> dict[str, int]:
+    """按状态统计热线记录量，给受理页的统计卡片用。"""
+    return service.status_summary()
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出市民热线清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "complaint", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -41,10 +63,13 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条热线记录，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
+    """登记一条热线记录：缺字段时说明原因；记录编号重复提交只生效一次。"""
+    entry, missing, duplicated = service.create_entry(payload.values)
     if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+        reasons = "、".join(f"{field}（{FIELD_HINTS.get(field, '请补全')}）" for field in missing)
+        return ActionResult(ok=False, message=f"缺少必填字段：{reasons}")
+    if duplicated and entry is not None:
+        return ActionResult(ok=True, message=f"记录编号 {entry['记录编号']} 已受理，重复提交未重复登记", entry=entry)
     return ActionResult(ok=True, message="热线记录已登记", entry=entry)
 
 
@@ -52,14 +77,7 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     """对单条热线记录执行转办部门、处理反馈、办结归档；不允许的动作会被拦下并说明原因。"""
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    entry, message = service.run_action(entry_id, action, payload.values)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出市民热线清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "complaint", "total": total, "items": items}
